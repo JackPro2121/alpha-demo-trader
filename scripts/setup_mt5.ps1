@@ -29,9 +29,9 @@ if (-not $term) {
 if (-not $term) { throw "terminal64.exe not found after install" }
 Write-Host "terminal at: $term"
 
-# first launch so the MetaTrader5 package can attach cleanly
+# launch once so the MetaTrader5 package can attach to a warm terminal.
+# DO NOT kill it: killing leaves stale IPC state and the package's
+# initialize() then fails with -10005 (the exact bug this fixes).
 Start-Process -FilePath $term
-Start-Sleep -Seconds 20
-Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Seconds 5
-Write-Host "MT5 terminal installed OK"
+Start-Sleep -Seconds 25
+Write-Host "MT5 terminal installed and running OK"
