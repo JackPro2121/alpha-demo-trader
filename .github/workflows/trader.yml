@@ -1,0 +1,104 @@
+name: demo-trader
+
+on:
+  workflow_dispatch:
+    inputs:
+      once:
+        description: "single cycle then exit (probe mode)"
+        required: false
+        default: "false"
+      symbols:
+        description: "comma list"
+        required: false
+        default: "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,NZDUSD,USDCHF"
+      timeframe:
+        description: "decision timeframe"
+        required: false
+        default: "H1"
+  schedule:
+    # 5 runs/day x ~5.5h => near-24/7 coverage (public repo = free minutes)
+    - cron: "5 0,5,10,15,20 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: demo-trader
+  cancel-in-progress: false
+
+jobs:
+  trade:
+    runs-on: windows-latest
+    timeout-minutes: 330
+    env:
+      ALPHA_CONNECTOR: mt5package
+      MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
+      MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
+      MT5_SERVER: ${{ secrets.MT5_SERVER }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      ALFA_REPO_TOKEN: ${{ secrets.ALFA_REPO_TOKEN }}
+      ALPHA_PERSIST_TOKEN: ${{ secrets.ALFA_REPO_TOKEN }}
+      ALPHA_PERSIST_REPO: ../alpha-data-store
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: JackPro2121/alpha-data-store
+          token: ${{ secrets.ALFA_REPO_TOKEN }}
+          path: alpha-data-store
+
+      - name: Clone ALPHA engine (private)
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://x-access-token:${{ secrets.ALFA_REPO_TOKEN }}@github.com/ranajawadai/ALPHAFOREX.git ../ALFAFOREX
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install MT5 terminal (silent)
+        shell: pwsh
+        run: ./scripts/setup_mt5.ps1
+
+      - name: Install python deps
+        shell: pwsh
+        run: |
+          pip install -r ../ALFAFOREX/requirements.txt
+          pip install MetaTrader5
+
+      - name: Run watcher
+        shell: pwsh
+        working-directory: ../ALFAFOREX/forexgpt-3.0
+        run: |
+          $once = "${{ github.event.inputs.once }}"
+          if ($once -eq "true") {
+            python -u -m forexgpt3.scripts.live_watch --once `
+              --symbols "${{ github.event.inputs.symbols }}" `
+              --timeframe "${{ github.event.inputs.timeframe }}"
+          } else {
+            $end = (Get-Date).AddMinutes(315)
+            while ((Get-Date) -lt $end) {
+              python -u -m forexgpt3.scripts.live_watch --once `
+                --symbols "${{ github.event.inputs.symbols }}" `
+                --timeframe "${{ github.event.inputs.timeframe }}"
+              Start-Sleep -Seconds 60
+            }
+          }
+
+      - name: Persist journal to data-store
+        if: always()
+        shell: pwsh
+        working-directory: ../ALFAFOREX/forexgpt-3.0
+        run: |
+          python ../../alpha-demo-trader/scripts/persist_journal.py
+        env:
+          STORE_DIR: ${{ github.workspace }}/alpha-data-store
+
+      - name: Upload journal artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: journal-${{ github.run_id }}
+          path: ../ALFAFOREX/forexgpt-3.0/data-runtime/platform.db
+          retention-days: 30
