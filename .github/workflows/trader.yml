@@ -39,7 +39,7 @@ jobs:
       MT5_MCP_TOKEN: ${{ secrets.MT5_MCP_TOKEN }}
       ALFA_REPO_TOKEN: ${{ secrets.ALFA_REPO_TOKEN }}
       ALPHA_PERSIST_TOKEN: ${{ secrets.ALFA_REPO_TOKEN }}
-      ALPHA_PERSIST_REPO: ../alpha-data-store
+      ALPHA_PERSIST_REPO: alpha-data-store
     steps:
       - uses: actions/checkout@v4
 
@@ -52,7 +52,7 @@ jobs:
       - name: Clone ALPHA engine (private)
         shell: pwsh
         run: |
-          git clone --depth 1 https://x-access-token:${{ secrets.ALFA_REPO_TOKEN }}@github.com/ranajawadai/ALPHAFOREX.git ../ALFAFOREX
+          git clone --depth 1 https://x-access-token:${{ secrets.ALFA_REPO_TOKEN }}@github.com/ranajawadai/ALPHAFOREX.git ALFAFOREX
 
       - uses: actions/setup-python@v5
         with:
@@ -65,12 +65,12 @@ jobs:
       - name: Install python deps
         shell: pwsh
         run: |
-          pip install -r ../ALFAFOREX/requirements.txt
+          pip install -r ALFAFOREX/requirements.txt
           pip install MetaTrader5
 
       - name: Run watcher
         shell: pwsh
-        working-directory: ../ALFAFOREX/forexgpt-3.0
+        working-directory: ALFAFOREX/forexgpt-3.0
         run: |
           $once = "${{ github.event.inputs.once }}"
           if ($once -eq "true") {
@@ -90,7 +90,7 @@ jobs:
       - name: Persist journal to data-store
         if: always()
         shell: pwsh
-        working-directory: ../ALFAFOREX/forexgpt-3.0
+        working-directory: ALFAFOREX/forexgpt-3.0
         run: |
           python ../../alpha-demo-trader/scripts/persist_journal.py
         env:
@@ -101,5 +101,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: journal-${{ github.run_id }}
-          path: ../ALFAFOREX/forexgpt-3.0/data-runtime/platform.db
+          path: ALFAFOREX/forexgpt-3.0/data-runtime/platform.db
           retention-days: 30
+

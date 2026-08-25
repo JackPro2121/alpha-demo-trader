@@ -1,7 +1,5 @@
-# MT5 setup v3: install -> pre-seed login + MCP config -> relaunch.
-# Goal: terminal comes up AUTO-LOGGED-IN with its MCP HTTP server enabled
-# using OUR key, so the proven MCPConnector path works on headless runners
-# (the MetaTrader5 package's named-pipe IPC is broken: -10005 everywhere).
+# MT5 setup v4: PORTABLE mode (all data inside install dir -> deterministic
+# paths) + login/MCP pre-seed + port probe. No APPDATA guessing.
 
 $ErrorActionPreference = "Stop"
 $setup = "$env:TEMP\mt5setup.exe"
@@ -20,79 +18,56 @@ if (-not (Test-Path $setup) -or (Get-Item $setup).Length -lt 1MB) {
 Write-Host "[2] installing /auto..."
 Start-Process -FilePath $setup -ArgumentList "/auto" -Wait
 
-$term = @("$env:ProgramFiles\MetaTrader 5\terminal64.exe",
-          "${env:ProgramFiles(x86)}\MetaTrader 5\terminal64.exe") |
-    Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $term) {
+$dir = "$env:ProgramFiles\MetaTrader 5"
+$term = Join-Path $dir "terminal64.exe"
+if (-not (Test-Path $term)) {
     $term = Get-ChildItem "$env:ProgramFiles" -Recurse -Filter terminal64.exe `
         -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+    $dir = Split-Path $term
 }
-if (-not $term) { throw "terminal64.exe not found" }
+if (-not (Test-Path $term)) { throw "terminal64.exe not found" }
 Write-Host "terminal: $term"
 
-Write-Host "[3] first launch (generates data folder)..."
-Start-Process -FilePath $term
-Start-Sleep -Seconds 30
-Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
-Start-Sleep -Seconds 5
-
-Write-Host "[4] locating data folder..."
-$cfgDir = Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Directory |
-    ForEach-Object { Join-Path $_.FullName "config" } |
-    Where-Object { Test-Path $_ } |
-    Sort-Object (Get-Item $_).LastWriteTime -Descending |
-    Select-Object -First 1
-if (-not $cfgDir) { throw "terminal config dir not found" }
-Write-Host "config dir: $cfgDir"
-
-Write-Host "[5] writing assistant.ini (MCP enable + our key)..."
-$asst = Join-Path $cfgDir "assistant.ini"
-$ini = @()
-if (Test-Path $asst) { $ini = Get-Content $asst }
-$hasMt = ($ini | Select-String -SimpleMatch "[MCP.MetaTrader]").Count -gt 0
-if (-not $hasMt) { $ini += "[MCP.MetaTrader]" }
-$new = @(); $inMt = $false; $wroteKey = $false; $wroteEn = $false
-foreach ($l in $ini) {
-    if ($l -match '^\[(.+)\]') {
-        if ($inMt) {
-            if (-not $wroteKey) { $new += "ApiKey=$key"; $wroteKey = $true }
-            if (-not $wroteEn)  { $new += "Enabled=1";   $wroteEn = $true }
-        }
-        $inMt = ($Matches[1] -eq "MCP.MetaTrader")
-        $new += $l
-        continue
-    }
-    if ($inMt -and $l -match '^ApiKey\s*=') { $new += "ApiKey=$key"; $wroteKey = $true; continue }
-    if ($inMt -and $l -match '^Enabled\s*=') { $new += "Enabled=1"; $wroteEn = $true; continue }
-    if ($inMt -and $l -match '^(Port|Address)\s*=') { continue }
-    $new += $l
-}
-if ($inMt) {
-    if (-not $wroteKey) { $new += "ApiKey=$key"; $wroteKey = $true }
-    if (-not $wroteEn)  { $new += "Enabled=1";   $wroteEn = $true }
-}
-Set-Content -Path $asst -Value $new -Encoding ASCII
-Write-Host "assistant.ini written (key len $($key.Length))"
-
-Write-Host "[6] writing login.ini (auto-login)..."
-$loginIni = Join-Path $cfgDir "alpha_login.ini"
+Write-Host "[3] writing login.ini + assistant.ini (portable config dir)..."
+$cfgDir = Join-Path $dir "Config"
+New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
 @"
 [Common]
 Login=$login
 Password=$pass
 Server=$server
-"@ | Set-Content -Path $loginIni -Encoding ASCII
+"@ | Set-Content -Path (Join-Path $cfgDir "alpha_login.ini") -Encoding ASCII
 
-Write-Host "[7] launching terminal with /config (auto-login)..."
-Start-Process -FilePath $term -ArgumentList "/config:$loginIni"
-Start-Sleep -Seconds 45
+$asst = Join-Path $cfgDir "assistant.ini"
+@"
+[MCP.MetaTrader]
+Enabled=1
+ApiKey=$key
+"@ | Set-Content -Path $asst -Encoding ASCII
+Write-Host "config written: $asst"
 
-Write-Host "[8] MCP port probe..."
-try {
-    $r = Invoke-WebRequest -Uri "http://127.0.0.1:22346/mcp" -Method Get `
-        -Headers @{Authorization = "Bearer $key"} -TimeoutSec 10 -SkipHttpErrorCheck
-    Write-Host "MCP_PORT_PROBE: HTTP $($r.StatusCode) (401/405/400 = SERVER ALIVE)"
-} catch {
-    Write-Host "MCP_PORT_PROBE: DEAD -> $($_.Exception.Message)"
+Write-Host "[4] launching terminal /portable /config (auto-login + MCP)..."
+Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
+
+Write-Host "[5] waiting for MCP port 22346..."
+$alive = $false
+foreach ($i in 1..12) {
+    Start-Sleep -Seconds 10
+    try {
+        $r = Invoke-WebRequest -Uri "http://127.0.0.1:22346/mcp" -Method Get `
+            -Headers @{Authorization = "Bearer $key"} -TimeoutSec 5 -SkipHttpErrorCheck
+        Write-Host ("  try {0}: HTTP {1}" -f $i, $r.StatusCode)
+        if ($r.StatusCode -in 400,401,403,405,426) { $alive = $true; break }
+    } catch {
+        Write-Host ("  try {0}: {1}" -f $i, $_.Exception.Message)
+    }
 }
-Write-Host "setup v3 complete"
+if ($alive) { Write-Host "MCP_PORT_PROBE: ALIVE" }
+else {
+    Write-Host "MCP_PORT_PROBE: DEAD"
+    Get-Process terminal64 -ErrorAction SilentlyContinue | ForEach-Object {
+        Write-Host ("terminal process running: PID " + $_.Id)
+    }
+    throw "MCP server did not come up (see probe lines above)"
+}
+Write-Host "setup v4 complete -- MCP ALIVE"
