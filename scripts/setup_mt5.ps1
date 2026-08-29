@@ -3,7 +3,6 @@
 
 $ErrorActionPreference = "Stop"
 $setup = "$env:TEMP\mt5setup.exe"
-$url = "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe"
 $key = $env:MT5_MCP_TOKEN
 $login = $env:MT5_LOGIN
 $pass = $env:MT5_PASSWORD
@@ -13,8 +12,26 @@ if (-not $key) { throw "MT5_MCP_TOKEN secret missing" }
 
 Write-Host "[1] downloading MT5 setup..."
 if (-not (Test-Path $setup) -or (Get-Item $setup).Length -lt 1MB) {
-    curl.exe -sSL $url -o $setup
+    $urls = @(
+        "https://download.mql5.com/cdn/web/metaquotes.software.corp/mt5/mt5setup.exe",
+        "https://download.mql5.com/cdn/web/exness.technologies.ltd/mt5/mt5setup.exe"
+    )
+    $ok = $false
+    foreach ($attempt in 1..3) {
+        foreach ($u in $urls) {
+            Write-Host ("  attempt {0}: {1}" -f $attempt, $u)
+            curl.exe -sSL --retry 2 --connect-timeout 30 $u -o $setup
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $setup) -and (Get-Item $setup).Length -gt 1MB) {
+                $ok = $true; break
+            }
+            Write-Host "  download failed (exit $LASTEXITCODE), trying next source..."
+        }
+        if ($ok) { break }
+        Start-Sleep -Seconds 15
+    }
+    if (-not $ok) { throw "MT5 setup download failed from all mirrors after 3 attempts" }
 }
+Write-Host ("  downloaded: {0:N1} MB" -f ((Get-Item $setup).Length / 1MB))
 Write-Host "[2] installing /auto..."
 Start-Process -FilePath $setup -ArgumentList "/auto" -Wait
 
@@ -47,6 +64,7 @@ ApiKey=$key
 Write-Host "config written: $asst"
 
 Write-Host "[4] launching terminal /portable /config (auto-login + MCP)..."
+$loginIni = Join-Path $cfgDir "alpha_login.ini"
 Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
 
 Write-Host "[5] waiting for MCP port 22346..."
