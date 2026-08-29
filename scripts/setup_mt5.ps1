@@ -3,12 +3,11 @@
 
 $ErrorActionPreference = "Stop"
 $setup = "$env:TEMP\mt5setup.exe"
-$key = $env:MT5_MCP_TOKEN
 $login = $env:MT5_LOGIN
 $pass = $env:MT5_PASSWORD
 $server = $env:MT5_SERVER
 
-if (-not $key) { throw "MT5_MCP_TOKEN secret missing" }
+if (-not $login -or -not $pass -or -not $server) { throw "MT5_LOGIN/MT5_PASSWORD/MT5_SERVER secrets missing" }
 
 Write-Host "[1] downloading MT5 setup..."
 if (-not (Test-Path $setup) -or (Get-Item $setup).Length -lt 1MB) {
@@ -55,32 +54,42 @@ Password=$pass
 Server=$server
 "@ | Set-Content -Path (Join-Path $cfgDir "alpha_login.ini") -Encoding ASCII
 
+# MT5 expects a 64-hex ApiKey (the format MT5 itself generates — verified
+# against a working terminal's assistant.ini). Generate fresh per run and
+# hand it to the watcher step via GITHUB_ENV so client and server never drift.
+if ($env:MCP_KEY_OVERRIDE) { $key = $env:MCP_KEY_OVERRIDE }
+else {
+    $key = -join ((1..64) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
+}
 $asst = Join-Path $cfgDir "assistant.ini"
-@"
-[MCP.MetaTrader]
-Enabled=1
-ApiKey=$key
-"@ | Set-Content -Path $asst -Encoding ASCII
-Write-Host "config written: $asst"
+# Field names + UTF-16LE encoding copied from a working terminal's config;
+# ASCII + Enabled= was silently ignored by the terminal (MCP 401s).
+$ini = "[MCP.MetaTrader]`r`nEnable=1`r`nEndpoint=http://127.0.0.1:22346/mcp`r`nApiKey=$key`r`n"
+Set-Content -Path $asst -Value $ini -Encoding Unicode
+"MCP_TOKEN=$key" | Add-Content -Path $env:GITHUB_ENV
+Write-Host "config written: $asst (ApiKey len $($key.Length), not printed)"
 
 Write-Host "[4] launching terminal /portable /config (auto-login + MCP)..."
 $loginIni = Join-Path $cfgDir "alpha_login.ini"
 Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
 
-Write-Host "[5] waiting for MCP port 22346..."
+Write-Host "[5] waiting for MCP server (authenticated probe)..."
+$body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'
 $alive = $false
 foreach ($i in 1..12) {
     Start-Sleep -Seconds 10
     try {
-        $r = Invoke-WebRequest -Uri "http://127.0.0.1:22346/mcp" -Method Get `
-            -Headers @{Authorization = "Bearer $key"} -TimeoutSec 5 -SkipHttpErrorCheck
+        $r = Invoke-WebRequest -Uri "http://127.0.0.1:22346/mcp" -Method Post `
+            -Headers @{Authorization = "Bearer $key"; Accept = "application/json, text/event-stream"} `
+            -ContentType "application/json" -Body $body -TimeoutSec 5 -SkipHttpErrorCheck
         Write-Host ("  try {0}: HTTP {1}" -f $i, $r.StatusCode)
-        if ($r.StatusCode -in 400,401,403,405,426) { $alive = $true; break }
+        if ($r.StatusCode -eq 200) { $alive = $true; break }
+        if ($r.StatusCode -eq 401) { Write-Host "  server up but key rejected -- assistant.ini not picked up" }
     } catch {
         Write-Host ("  try {0}: {1}" -f $i, $_.Exception.Message)
     }
 }
-if ($alive) { Write-Host "MCP_PORT_PROBE: ALIVE" }
+if ($alive) { Write-Host "MCP_PORT_PROBE: ALIVE+AUTH" }
 else {
     Write-Host "MCP_PORT_PROBE: DEAD"
     Get-Process terminal64 -ErrorAction SilentlyContinue | ForEach-Object {
@@ -88,4 +97,4 @@ else {
     }
     throw "MCP server did not come up (see probe lines above)"
 }
-Write-Host "setup v4 complete -- MCP ALIVE"
+Write-Host "setup v4 complete -- MCP ALIVE+AUTH"

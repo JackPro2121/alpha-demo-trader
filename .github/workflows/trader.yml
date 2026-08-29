@@ -71,6 +71,10 @@ jobs:
       - name: Run watcher
         shell: pwsh
         working-directory: ALFAFOREX/forexgpt-3.0
+        env:
+          # setup_mt5.ps1 generates the MCP key and exports MCP_TOKEN via
+          # GITHUB_ENV; fall back to the static secret only if unset
+          MT5_MCP_TOKEN: ${{ env.MCP_TOKEN || secrets.MT5_MCP_TOKEN }}
         run: |
           $once = "${{ github.event.inputs.once }}"
           if ($once -eq "true") {
