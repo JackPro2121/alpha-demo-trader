@@ -1,7 +1,7 @@
-# MT5 setup v5: PORTABLE mode + login pre-seed + MCP key discovery.
-# The terminal's MCP server uses a key MT5 generates itself (assistant.ini is
-# MT5's OUTPUT, not input) — so after launch we read back the ApiKey MT5
-# actually persists and hand that to the watcher step via GITHUB_ENV.
+# MT5 setup v6: PORTABLE mode + login pre-seed + MCP key discovery + restart.
+# The MCP server holds the key from startup and only a terminal restart reloads
+# it (MT5-CONNECTION-JOURNEY.md §4) — so after launch we restart the terminal,
+# rescan assistant.ini locations, and probe with every distinct key found.
 
 $ErrorActionPreference = "Stop"
 $setup = "$env:TEMP\mt5setup.exe"
@@ -67,65 +67,88 @@ Set-Content -Path $asst -Value $ini -Encoding Unicode
 Write-Host "seed written: $asst (ApiKey len $($key.Length), not printed)"
 
 Write-Host "[4] launching terminal /portable /config (auto-login + MCP)..."
+$loginIni = Join-Path $cfgDir "alpha_login.ini"
 Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
 
 Write-Host "[5] discovering the MCP key the terminal actually uses..."
-# Scan candidate assistant.ini locations; if MT5 rewrote the seed with its own
-# key, re-export that. Never echo the key itself.
-$ourKey = $key
-$probeKey = $key
-$ourFile = $asst
-foreach ($i in 1..24) {
-    Start-Sleep -Seconds 5
-    $candidates = @($ourFile)
-    $candidates += Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Recurse -Filter assistant.ini `
+# Scan candidate assistant.ini locations; collect every distinct hex key we see.
+# Never echo the key itself.
+function Get-CandidateKeyFiles {
+    $files = @($asst)
+    $files += Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Recurse -Filter assistant.ini `
         -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-    foreach ($f in $candidates) {
-        if (-not (Test-Path $f)) { continue }
-        if ($f -eq $ourFile -and (Get-Item $f).LastWriteTimeUtc -lt (Get-Date).AddMinutes(-2)) { continue }
-        $txt = Get-Content $f -Raw -ErrorAction SilentlyContinue
-        if ($txt -match '(?im)^\s*ApiKey\s*=\s*([0-9a-f]{32,128})\s*$') {
-            $found = $Matches[1]
-            if ($found -ne $ourKey) {
-                Write-Host ("  MT5 rewrote {0} with its own key (len {1}) -- using it" -f $f, $found.Length)
-                $probeKey = $found
-            }
-            else {
-                Write-Host ("  key intact in {0} -- MT5 honored our seed" -f $f)
-            }
-            break
-        }
-    }
-    if ($probeKey -ne $key) { break }
-}
-if ($probeKey -ne $key) {
-    "MCP_TOKEN=$probeKey" | Add-Content -Path $env:GITHUB_ENV
-    Write-Host "MCP_TOKEN re-exported with MT5's key"
+    return $files | Select-Object -Unique
 }
 
-Write-Host "[6] probing MCP server on 127.0.0.1:22346..."
+function Get-FoundKeys {
+    $keys = @()
+    foreach ($f in (Get-CandidateKeyFiles)) {
+        if (-not (Test-Path $f)) { continue }
+        $txt = Get-Content $f -Raw -ErrorAction SilentlyContinue
+        if ($txt -match '(?im)^\s*ApiKey\s*=\s*([0-9a-f]{32,128})\s*$') {
+            $keys += $Matches[1]
+        }
+    }
+    return $keys | Select-Object -Unique
+}
+
+foreach ($i in 1..24) {
+    Start-Sleep -Seconds 5
+    $keys = @(Get-FoundKeys)
+    if ($keys.Count -gt 1) { break }
+    if ($i % 6 -eq 0) { Write-Host ("  scan {0}: {1} distinct key(s) so far" -f $i, $keys.Count) }
+}
+
+# [6] RESTART cycle: the running MCP server holds the key from startup and only
+# a terminal restart reloads it (documented in MT5-CONNECTION-JOURNEY.md §4).
+# Killing + relaunching lets the server adopt whatever is in assistant.ini now,
+# and gives MT5 a chance to persist its own key first.
+Write-Host "[6] restarting terminal so the MCP server reloads the on-disk key..."
+Stop-Process -Name terminal64 -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 5
+Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
+Start-Sleep -Seconds 60
+$keys = @(Get-FoundKeys)
+if ($keys.Count -eq 0) { $keys = @($key) }
+Write-Host ("  candidate keys after restart: {0}" -f $keys.Count)
+
+Write-Host "[7] probing MCP server on 127.0.0.1:22346..."
 $body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'
 $alive = $false
 $authOk = $false
+$authKey = $null
 $seenStatus = @()
-foreach ($i in 1..12) {
-    Start-Sleep -Seconds 10
-    try {
-        $hdrs = @{ Accept = "application/json, text/event-stream" }
-        if ($probeKey) { $hdrs.Authorization = "Bearer $probeKey" }
-        $r = Invoke-WebRequest -Uri "http://127.0.0.1:22346/mcp" -Method Post `
-            -Headers $hdrs -ContentType "application/json" -Body $body -TimeoutSec 5 -SkipHttpErrorCheck
-        $seenStatus += $r.StatusCode
-        Write-Host ("  try {0}: HTTP {1}" -f $i, $r.StatusCode)
-        if ($r.StatusCode -eq 200) { $alive = $true; $authOk = $true; break }
-        if ($r.StatusCode -eq 401) {
-            Write-Host "  server up but key rejected"
+foreach ($round in 1..6) {
+    Start-Sleep -Seconds 15
+    foreach ($k in $keys) {
+        try {
+            $hdrs = @{ Accept = "application/json, text/event-stream" }
+            $hdrs.Authorization = "Bearer $k"
+            $r = Invoke-WebRequest -Uri "http://127.0.0.1:22346/mcp" -Method Post `
+                -Headers $hdrs -ContentType "application/json" -Body $body -TimeoutSec 5 -SkipHttpErrorCheck
+            $seenStatus += $r.StatusCode
+            Write-Host ("  round {0}: HTTP {1}" -f $round, $r.StatusCode)
+            if ($r.StatusCode -eq 200) { $alive = $true; $authOk = $true; $authKey = $k; break }
+            if ($r.StatusCode -eq 401 -and $round -eq 1) {
+                $wa = $r.Headers["WWW-Authenticate"]
+                if ($wa) { Write-Host "  401 WWW-Authenticate: $wa" }
+            }
+        } catch {
+            Write-Host ("  round {0}: {1}" -f $round, $_.Exception.Message)
         }
-    } catch {
-        Write-Host ("  try {0}: {1}" -f $i, $_.Exception.Message)
+    }
+    if ($alive) { break }
+    # a mid-probe rewrite means MT5 persisted a new key -- rescan once
+    $fresh = @(Get-FoundKeys)
+    foreach ($nk in $fresh) { if ($keys -notcontains $nk) { $keys += $nk } }
+}
+if ($alive) {
+    Write-Host "MCP_PORT_PROBE: ALIVE+AUTH"
+    if ($authKey -ne $key) {
+        "MCP_TOKEN=$authKey" | Add-Content -Path $env:GITHUB_ENV
+        Write-Host "MCP_TOKEN re-exported with the key the server accepted"
     }
 }
-if ($alive) { Write-Host "MCP_PORT_PROBE: ALIVE+AUTH" }
 elseif ($seenStatus.Count -gt 0) {
     Write-Host ("MCP_PORT_PROBE: LISTENING (statuses: {0}) but auth unresolved" -f (($seenStatus | Select-Object -Unique) -join ','))
     Write-Host "setup complete with WARNINGS -- watcher will run analysis-only"
@@ -137,4 +160,4 @@ else {
     }
     throw "MCP server did not come up (see probe lines above)"
 }
-Write-Host "setup v5 complete"
+Write-Host "setup v6 complete"

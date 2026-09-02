@@ -76,17 +76,22 @@ jobs:
           # GITHUB_ENV; fall back to the static secret only if unset
           MT5_MCP_TOKEN: ${{ env.MCP_TOKEN || secrets.MT5_MCP_TOKEN }}
         run: |
-          $once = "${{ github.event.inputs.once }}"
-          if ($once -eq "true") {
+          $rawOnce = "${{ github.event.inputs.once }}"
+          $rawSyms = "${{ github.event.inputs.symbols }}"
+          $rawTf = "${{ github.event.inputs.timeframe }}"
+          $syms = if ($rawSyms -and $rawSyms.Trim()) { $rawSyms.Trim() } else { "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD,NZDUSD,USDCHF" }
+          $tf = if ($rawTf -and $rawTf.Trim()) { $rawTf.Trim() } else { "H1" }
+          Write-Host "Starting watcher with symbols: $syms | timeframe: $tf"
+          if ($rawOnce -eq "true") {
             python -u -m forexgpt3.scripts.live_watch --once `
-              --symbols "${{ github.event.inputs.symbols }}" `
-              --timeframe "${{ github.event.inputs.timeframe }}"
+              --symbols "$syms" `
+              --timeframe "$tf"
           } else {
             $end = (Get-Date).AddMinutes(315)
             while ((Get-Date) -lt $end) {
               python -u -m forexgpt3.scripts.live_watch --once `
-                --symbols "${{ github.event.inputs.symbols }}" `
-                --timeframe "${{ github.event.inputs.timeframe }}"
+                --symbols "$syms" `
+                --timeframe "$tf"
               Start-Sleep -Seconds 60
             }
           }
