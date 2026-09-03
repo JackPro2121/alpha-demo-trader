@@ -1,0 +1,77 @@
+name: quant-sweep
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbol:
+        description: "Symbol to sweep (e.g. GBPUSD, EURUSD, USDJPY, AUDUSD)"
+        required: true
+        default: "GBPUSD"
+      timeframe:
+        description: "Timeframe"
+        required: true
+        default: "H1"
+      holdout_date:
+        description: "Holdout boundary date (YYYY-MM-DD)"
+        required: true
+        default: "2025-06-01"
+      dual_mode:
+        description: "Enable Dual-Mode Technical (anti-chop)"
+        required: false
+        default: "true"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quant-sweep-${{ github.event.inputs.symbol || 'default' }}
+  cancel-in-progress: false
+
+jobs:
+  sweep:
+    name: sweep-${{ github.event.inputs.symbol || 'GBPUSD' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout runner repo
+        uses: actions/checkout@v4
+
+      - name: Checkout data-store repo
+        uses: actions/checkout@v4
+        with:
+          repository: JackPro2121/alpha-data-store
+          token: ${{ secrets.ALFA_REPO_TOKEN }}
+          path: alpha-data-store
+
+      - name: Clone ALPHA engine (private)
+        run: |
+          git clone --depth 1 https://x-access-token:${{ secrets.ALFA_REPO_TOKEN }}@github.com/ranajawadai/ALPHAFOREX.git ALFAFOREX
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r ALFAFOREX/requirements.txt
+
+      - name: Run Cloud Parity Sweep
+        working-directory: ALFAFOREX/forexgpt-3.0
+        env:
+          PYTHONPATH: ${{ github.workspace }}/ALFAFOREX:${{ github.workspace }}/ALFAFOREX/forexgpt-2.0:${{ github.workspace }}/ALFAFOREX/forexgpt-3.0
+        run: |
+          python ../../scripts/cloud_sweep.py \
+            --symbol "${{ github.event.inputs.symbol }}" \
+            --timeframe "${{ github.event.inputs.timeframe }}" \
+            --holdout "${{ github.event.inputs.holdout_date }}" \
+            --dual-mode "${{ github.event.inputs.dual_mode }}"
+
+      - name: Upload sweep results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sweep-results-${{ github.event.inputs.symbol }}-${{ github.run_id }}
+          path: ALFAFOREX/forexgpt-3.0/data-runtime/parity-cache/
+          retention-days: 30
