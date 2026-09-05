@@ -31,7 +31,7 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 330
     env:
-      ALPHA_CONNECTOR: mcp
+      ALPHA_CONNECTOR: auto
       MT5_LOGIN: ${{ secrets.MT5_LOGIN }}
       MT5_PASSWORD: ${{ secrets.MT5_PASSWORD }}
       MT5_SERVER: ${{ secrets.MT5_SERVER }}
