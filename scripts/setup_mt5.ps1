@@ -1,13 +1,14 @@
-# MT5 setup v6: PORTABLE mode + login pre-seed + MCP key discovery + restart.
-# The MCP server holds the key from startup and only a terminal restart reloads
-# it (MT5-CONNECTION-JOURNEY.md §4) — so after launch we restart the terminal,
-# rescan assistant.ini locations, and probe with every distinct key found.
+# MT5 setup v7: portable install + login pre-seed + runtime MCP key discovery.
+# Fresh installs regenerate the MCP bearer key; assistant.ini only holds an
+# obfuscated hex the server rejects. The live key sits in terminal64 memory —
+# find_mcp_key.py scans + probes until HTTP 200, then we export MCP_TOKEN.
 
 $ErrorActionPreference = "Stop"
 $setup = "$env:TEMP\mt5setup.exe"
 $login = $env:MT5_LOGIN
 $pass = $env:MT5_PASSWORD
 $server = $env:MT5_SERVER
+$repoRoot = Split-Path -Parent $PSScriptRoot
 
 if (-not $login -or -not $pass -or -not $server) { throw "MT5_LOGIN/MT5_PASSWORD/MT5_SERVER secrets missing" }
 
@@ -46,7 +47,7 @@ if (-not (Test-Path $term)) {
 if (-not (Test-Path $term)) { throw "terminal64.exe not found" }
 Write-Host "terminal: $term"
 
-Write-Host "[3] writing login.ini + seed assistant.ini (portable config dir)..."
+Write-Host "[3] writing login.ini (portable config dir)..."
 $cfgDir = Join-Path $dir "Config"
 New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
 @"
@@ -56,108 +57,52 @@ Password=$pass
 Server=$server
 "@ | Set-Content -Path (Join-Path $cfgDir "alpha_login.ini") -Encoding ASCII
 
-# Seed an assistant.ini the way a working terminal writes it (Enable=, Endpoint=,
-# 64-hex key, UTF-16LE). If MT5 honors it, the key below IS the server key. If
-# MT5 regenerates its own, step [5] discovers that and re-exports.
-$key = -join ((1..64) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
+# Enable MCP only — do NOT invent an ApiKey. Fresh terminals regenerate their
+# own key; a fake hex here was the old 401. find_mcp_key.py reads the live one.
 $asst = Join-Path $cfgDir "assistant.ini"
-$ini = "[MCP.MetaTrader]`r`nEnable=1`r`nEndpoint=http://127.0.0.1:22346/mcp`r`nApiKey=$key`r`n"
+$ini = "[MCP.MetaTrader]`r`nEnable=1`r`nEndpoint=http://127.0.0.1:22346/mcp`r`n"
 Set-Content -Path $asst -Value $ini -Encoding Unicode
-"MCP_TOKEN=$key" | Add-Content -Path $env:GITHUB_ENV
-Write-Host "seed written: $asst (ApiKey len $($key.Length), not printed)"
+Write-Host "seeded assistant.ini Enable=1 (no ApiKey)"
 
 Write-Host "[4] launching terminal /portable /config (auto-login + MCP)..."
 $loginIni = Join-Path $cfgDir "alpha_login.ini"
+Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 2
 Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
 
-Write-Host "[5] discovering the MCP key the terminal actually uses..."
-# Scan candidate assistant.ini locations; collect every distinct hex key we see.
-# Never echo the key itself.
-function Get-CandidateKeyFiles {
-    $files = @($asst)
-    $files += Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Recurse -Filter assistant.ini `
-        -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-    return $files | Select-Object -Unique
+$finder = Join-Path $repoRoot "scripts\find_mcp_key.py"
+if (-not (Test-Path $finder)) { throw "find_mcp_key.py missing at $finder" }
+
+Write-Host "[5] discovering MCP key from terminal memory + probing auth..."
+$key = $null
+# Pass 1: wait up to 3 minutes for port + 200
+$out = & python $finder --url "http://127.0.0.1:22346/mcp" --wait 180 --rescan 6 2>&1
+$exit = $LASTEXITCODE
+$out | ForEach-Object { Write-Host "  $_" }
+if ($exit -eq 0) {
+    $key = (@($out) | Where-Object { $_ -match '^[A-Za-z0-9_-]{40,44}$' } | Select-Object -Last 1)
 }
 
-function Get-FoundKeys {
-    $keys = @()
-    foreach ($f in (Get-CandidateKeyFiles)) {
-        if (-not (Test-Path $f)) { continue }
-        $txt = Get-Content $f -Raw -ErrorAction SilentlyContinue
-        if ($txt -match '(?im)^\s*ApiKey\s*=\s*([0-9a-f]{32,128})\s*$') {
-            $keys += $Matches[1]
-        }
-    }
-    return $keys | Select-Object -Unique
-}
-
-foreach ($i in 1..24) {
+if (-not $key) {
+    Write-Host "[6] first pass failed — restarting terminal and retrying discovery..."
+    Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 5
-    $keys = @(Get-FoundKeys)
-    if ($keys.Count -gt 1) { break }
-    if ($i % 6 -eq 0) { Write-Host ("  scan {0}: {1} distinct key(s) so far" -f $i, $keys.Count) }
-}
-
-# [6] RESTART cycle: the running MCP server holds the key from startup and only
-# a terminal restart reloads it (documented in MT5-CONNECTION-JOURNEY.md §4).
-# Killing + relaunching lets the server adopt whatever is in assistant.ini now,
-# and gives MT5 a chance to persist its own key first.
-Write-Host "[6] restarting terminal so the MCP server reloads the on-disk key..."
-Stop-Process -Name terminal64 -Force -ErrorAction SilentlyContinue
-Start-Sleep -Seconds 5
-Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
-Start-Sleep -Seconds 60
-$keys = @(Get-FoundKeys)
-if ($keys.Count -eq 0) { $keys = @($key) }
-Write-Host ("  candidate keys after restart: {0}" -f $keys.Count)
-
-Write-Host "[7] probing MCP server on 127.0.0.1:22346..."
-$body = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"probe","version":"0"}}}'
-$alive = $false
-$authOk = $false
-$authKey = $null
-$seenStatus = @()
-foreach ($round in 1..6) {
-    Start-Sleep -Seconds 15
-    foreach ($k in $keys) {
-        try {
-            $hdrs = @{ Accept = "application/json, text/event-stream" }
-            $hdrs.Authorization = "Bearer $k"
-            $r = Invoke-WebRequest -Uri "http://127.0.0.1:22346/mcp" -Method Post `
-                -Headers $hdrs -ContentType "application/json" -Body $body -TimeoutSec 5 -SkipHttpErrorCheck
-            $seenStatus += $r.StatusCode
-            Write-Host ("  round {0}: HTTP {1}" -f $round, $r.StatusCode)
-            if ($r.StatusCode -eq 200) { $alive = $true; $authOk = $true; $authKey = $k; break }
-            if ($r.StatusCode -eq 401 -and $round -eq 1) {
-                $wa = $r.Headers["WWW-Authenticate"]
-                if ($wa) { Write-Host "  401 WWW-Authenticate: $wa" }
-            }
-        } catch {
-            Write-Host ("  round {0}: {1}" -f $round, $_.Exception.Message)
-        }
-    }
-    if ($alive) { break }
-    # a mid-probe rewrite means MT5 persisted a new key -- rescan once
-    $fresh = @(Get-FoundKeys)
-    foreach ($nk in $fresh) { if ($keys -notcontains $nk) { $keys += $nk } }
-}
-if ($alive) {
-    Write-Host "MCP_PORT_PROBE: ALIVE+AUTH"
-    if ($authKey -ne $key) {
-        "MCP_TOKEN=$authKey" | Add-Content -Path $env:GITHUB_ENV
-        Write-Host "MCP_TOKEN re-exported with the key the server accepted"
+    Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
+    $out = & python $finder --url "http://127.0.0.1:22346/mcp" --wait 180 --rescan 6 2>&1
+    $exit = $LASTEXITCODE
+    $out | ForEach-Object { Write-Host "  $_" }
+    if ($exit -eq 0) {
+        $key = (@($out) | Where-Object { $_ -match '^[A-Za-z0-9_-]{40,44}$' } | Select-Object -Last 1)
     }
 }
-elseif ($seenStatus.Count -gt 0) {
-    Write-Host ("MCP_PORT_PROBE: LISTENING (statuses: {0}) but auth unresolved" -f (($seenStatus | Select-Object -Unique) -join ','))
+
+if (-not $key) {
+    Write-Host "MCP_PORT_PROBE: LISTENING but auth unresolved"
     Write-Host "setup complete with WARNINGS -- watcher will run analysis-only"
+    exit 0
 }
-else {
-    Write-Host "MCP_PORT_PROBE: DEAD"
-    Get-Process terminal64 -ErrorAction SilentlyContinue | ForEach-Object {
-        Write-Host ("terminal process running: PID " + $_.Id)
-    }
-    throw "MCP server did not come up (see probe lines above)"
-}
-Write-Host "setup v6 complete"
+
+"MCP_TOKEN=$key" | Add-Content -Path $env:GITHUB_ENV
+Write-Host "MCP_PORT_PROBE: ALIVE+AUTH"
+Write-Host "MCP_TOKEN exported from live terminal key (not printed)"
+Write-Host "setup v7 complete"
