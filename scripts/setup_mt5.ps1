@@ -1,7 +1,7 @@
-# MT5 setup v7: portable install + login pre-seed + runtime MCP key discovery.
-# Fresh installs regenerate the MCP bearer key; assistant.ini only holds an
-# obfuscated hex the server rejects. The live key sits in terminal64 memory —
-# find_mcp_key.py scans + probes until HTTP 200, then we export MCP_TOKEN.
+# MT5 setup v8: portable install + login pre-seed + known MCP key seed + discovery.
+# Fresh terminals may generate no GUI-readable key until Generate is clicked.
+# We pre-seed assistant.ini with a plaintext base64url ApiKey (GUI format) so the
+# server can load it on first start; find_mcp_key.py probes seed + memory + config.
 
 $ErrorActionPreference = "Stop"
 $setup = "$env:TEMP\mt5setup.exe"
@@ -47,7 +47,7 @@ if (-not (Test-Path $term)) {
 if (-not (Test-Path $term)) { throw "terminal64.exe not found" }
 Write-Host "terminal: $term"
 
-Write-Host "[3] writing login.ini (portable config dir)..."
+Write-Host "[3] writing login.ini + seed assistant.ini (known plaintext key)..."
 $cfgDir = Join-Path $dir "Config"
 New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
 @"
@@ -57,12 +57,32 @@ Password=$pass
 Server=$server
 "@ | Set-Content -Path (Join-Path $cfgDir "alpha_login.ini") -Encoding ASCII
 
-# Enable MCP only — do NOT invent an ApiKey. Fresh terminals regenerate their
-# own key; a fake hex here was the old 401. find_mcp_key.py reads the live one.
+# GUI-format base64url key (42 chars) — not hex. Server may load plaintext ApiKey
+# on first start; if it regenerates/obfuscates, find_mcp_key still scans memory.
+$seed = -join ((1..42) | ForEach-Object {
+    $n = Get-Random -Maximum 64
+    if ($n -lt 10) { [string]$n }
+    elseif ($n -lt 36) { [char](55 + $n) }          # A-V-ish; force mixed
+    elseif ($n -lt 62) { [char](61 + $n) }          # a-z-ish
+    else { @('-','_')[$n - 62] }
+})
+# ensure charset is base64url and mixed case
+$seed = [regex]::Replace($seed, '[^A-Za-z0-9_-]', 'x')
+$bytes = New-Object byte[] 31
+$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+$rng.GetBytes($bytes)
+$seed = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+if ($seed.Length -lt 40 -or $seed.Length -gt 44) { throw "seed key bad length $($seed.Length)" }
+
 $asst = Join-Path $cfgDir "assistant.ini"
-$ini = "[MCP.MetaTrader]`r`nEnable=1`r`nEndpoint=http://127.0.0.1:22346/mcp`r`n"
+$ini = @"
+[MCP.MetaTrader]
+Enable=1
+Endpoint=http://127.0.0.1:22346/mcp
+ApiKey=$seed
+"@
 Set-Content -Path $asst -Value $ini -Encoding Unicode
-Write-Host "seeded assistant.ini Enable=1 (no ApiKey)"
+Write-Host "seeded assistant.ini Enable=1 + plaintext ApiKey (len $($seed.Length), not printed)"
 
 Write-Host "[4] launching terminal /portable /config (auto-login + MCP)..."
 $loginIni = Join-Path $cfgDir "alpha_login.ini"
@@ -73,30 +93,38 @@ Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
 $finder = Join-Path $repoRoot "scripts\find_mcp_key.py"
 if (-not (Test-Path $finder)) { throw "find_mcp_key.py missing at $finder" }
 
-Write-Host "[5] discovering MCP key from terminal memory + probing auth..."
-$key = $null
-# Pass 1: wait up to 3 minutes for port + 200
-$out = & python $finder --url "http://127.0.0.1:22346/mcp" --wait 180 --rescan 6 2>&1
-$exit = $LASTEXITCODE
-$out | ForEach-Object { Write-Host "  $_" }
-if ($exit -eq 0) {
-    $key = (@($out) | Where-Object { $_ -match '^[A-Za-z0-9_-]{40,44}$' } | Select-Object -Last 1)
-}
-
-if (-not $key) {
-    Write-Host "[6] first pass failed — restarting terminal and retrying discovery..."
-    Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Seconds 5
-    Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
-    $out = & python $finder --url "http://127.0.0.1:22346/mcp" --wait 180 --rescan 6 2>&1
+function Invoke-KeyFind([string]$label) {
+    Write-Host "$label discovering MCP key (seed + memory + config)..."
+    $out = & python $finder --url "http://127.0.0.1:22346/mcp" --wait 150 --rescan 6 --seed-key $seed 2>&1
     $exit = $LASTEXITCODE
     $out | ForEach-Object { Write-Host "  $_" }
-    if ($exit -eq 0) {
-        $key = (@($out) | Where-Object { $_ -match '^[A-Za-z0-9_-]{40,44}$' } | Select-Object -Last 1)
-    }
+    if ($exit -ne 0) { return $null }
+    $k = (@($out) | Where-Object { $_ -match '^[A-Za-z0-9_-]{40,64}$' -and $_ -ne '' } | Select-Object -Last 1)
+    return $k
+}
+
+$key = Invoke-KeyFind "[5]"
+
+if (-not $key) {
+    Write-Host "[6] restart terminal (server reloads on-disk key) + retry..."
+    Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
+    Start-Sleep -Seconds 5
+    # re-seed in case MT5 rewrote/obfuscated the ApiKey
+    Set-Content -Path $asst -Value $ini -Encoding Unicode
+    Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
+    $key = Invoke-KeyFind "[7]"
 }
 
 if (-not $key) {
+    # dump config state for artifacts (lengths only)
+    if (Test-Path $asst) {
+        $txt = Get-Content $asst -Raw -ErrorAction SilentlyContinue
+        if ($txt -match '(?im)ApiKey\s*=\s*(\S+)') {
+            Write-Host ("assistant.ini ApiKey present len={0} hex_like={1}" -f $Matches[1].Length, ($Matches[1] -match '^[0-9a-fA-F]+$'))
+        } else {
+            Write-Host "assistant.ini ApiKey absent after runs"
+        }
+    }
     Write-Host "MCP_PORT_PROBE: LISTENING but auth unresolved"
     Write-Host "setup complete with WARNINGS -- watcher will run analysis-only"
     exit 0
@@ -104,5 +132,5 @@ if (-not $key) {
 
 "MCP_TOKEN=$key" | Add-Content -Path $env:GITHUB_ENV
 Write-Host "MCP_PORT_PROBE: ALIVE+AUTH"
-Write-Host "MCP_TOKEN exported from live terminal key (not printed)"
-Write-Host "setup v7 complete"
+Write-Host "MCP_TOKEN exported (not printed)"
+Write-Host "setup v8 complete"
