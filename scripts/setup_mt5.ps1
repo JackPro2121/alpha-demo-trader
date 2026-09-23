@@ -42,6 +42,7 @@ if (-not (Test-Path $term)) {
     $dir = Split-Path $term
 }
 if (-not (Test-Path $term)) { throw "terminal64.exe not found" }
+if ($env:GITHUB_ENV) { "MT5_PATH=$term" | Add-Content -Path $env:GITHUB_ENV }
 Write-Host "terminal: $term"
 
 Write-Host "[3] writing login.ini + assistant.ini (plaintext ApiKey + read-only)..."
@@ -94,9 +95,10 @@ New-Item -ItemType Directory -Force -Path $artDir | Out-Null
 
 Write-Host "[4] launching terminal /config (auto-login + MCP)..."
 $loginIni = Join-Path $cfgDir "alpha_login.ini"
+$startArgs = @("/portable", "/login:$login", "/config:`"$loginIni`"")
 Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 2
-Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
+Start-Process -FilePath $term -ArgumentList $startArgs
 
 # Primary: probe our seed key immediately (server should load plaintext from read-only file).
 $finder = Join-Path $repoRoot "scripts\find_mcp_key.py"
@@ -107,16 +109,19 @@ function Invoke-KeyFind([string]$label, [string]$url, [string]$extraArgs = "") {
     if ($extraArgs) { $argList += $extraArgs -split ' ' }
     $out = & python @argList 2>&1
     $exit = $LASTEXITCODE
-    $out | ForEach-Object { Write-Host "  $_" }
-    if ($exit -ne 0) { return $null }
+    if ($exit -ne 0) {
+        Write-Host "$label failed"
+        return $null
+    }
     $k = (@($out) | Where-Object { $_ -match '^[A-Za-z0-9_-]{40,64}$' -and $_ -ne '' } | Select-Object -Last 1)
     return $k
 }
 
 function Save-ConfigDiag {
     if (Test-Path $asst) {
-        Copy-Item $asst (Join-Path $artDir "assistant.ini") -Force -ErrorAction SilentlyContinue
         $txt = Get-Content $asst -Raw -ErrorAction SilentlyContinue
+        $redacted = [regex]::Replace($txt, '(?im)^(\s*ApiKey\s*=\s*).+$', '$1<redacted>')
+        Set-Content -Path (Join-Path $artDir "assistant.ini") -Value $redacted -Encoding Unicode
         if ($txt -match '(?im)ApiKey\s*=\s*(\S+)') {
             $v = $Matches[1]
             Write-Host ("assistant.ini ApiKey present len={0} hex_like={1} readonly={2}" -f `
@@ -128,8 +133,9 @@ function Save-ConfigDiag {
     }
     $roaming = Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Recurse -Filter assistant.ini -ErrorAction SilentlyContinue
     foreach ($f in $roaming) {
-        Copy-Item $f.FullName (Join-Path $artDir ("assistant_" + $f.Directory.Name + ".ini")) -Force -ErrorAction SilentlyContinue
         $txt = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
+        $redacted = [regex]::Replace($txt, '(?im)^(\s*ApiKey\s*=\s*).+$', '$1<redacted>')
+        Set-Content -Path (Join-Path $artDir ("assistant_" + $f.Directory.Name + ".ini")) -Value $redacted -Encoding Unicode
         if ($txt -match '(?im)ApiKey\s*=\s*(\S+)') {
             Write-Host ("roaming {0} ApiKey len={1}" -f $f.FullName, $Matches[1].Length)
         }
@@ -175,7 +181,7 @@ ApiKey=$seedKey
             Write-Host "readonly re-apply warning: $_"
         }
     }
-    Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
+    Start-Process -FilePath $term -ArgumentList $startArgs
     $key = Invoke-KeyFind "[7]" "http://127.0.0.1:22346/mcp"
     Save-ConfigDiag
 }
@@ -184,7 +190,6 @@ if (-not $key) {
     # last resort: seed-key direct probe once more after short wait
     Write-Host "[8] direct seed-key probe..."
     $out = & python $finder "--url=http://127.0.0.1:22346/mcp" "--wait=30" "--rescan=4" "--seed-key=$seedKey" 2>&1
-    $out | ForEach-Object { Write-Host "  $_" }
     if ($LASTEXITCODE -eq 0) {
         $key = (@($out) | Where-Object { $_ -match '^[A-Za-z0-9_-]{40,64}$' } | Select-Object -Last 1)
     }
@@ -197,7 +202,9 @@ if (-not $key) {
 }
 
 "MCP_TOKEN=$key" | Add-Content -Path $env:GITHUB_ENV
+"MT5_MCP_TOKEN=$key" | Add-Content -Path $env:GITHUB_ENV
 $env:MCP_TOKEN = $key
+$env:MT5_MCP_TOKEN = $key
 Write-Host "MCP_PORT_PROBE: ALIVE+AUTH"
 Write-Host "MCP_TOKEN exported (not printed)"
 
@@ -231,18 +238,22 @@ function Get-TerminalAuthLines {
 }
 
 $ready = $false
+$authorized = $false
+$authPattern = "(?i)authorized on\s+$([regex]::Escape($server))(?:\s|$)"
 for ($i = 1; $i -le 12; $i++) {
     Write-Host "[login-wait $i/12] dumping MCP account_info..."
     & python $dump --url=http://127.0.0.1:22346/mcp --token=$key --out=$outJson --wait=5 `
         --expect-login=$login --expect-server=$server 2>&1 |
         ForEach-Object { Write-Host "  $_" }
+    $authLines = @(Get-TerminalAuthLines)
+    $authorized = @($authLines | Where-Object { $_ -match $authPattern }).Count -gt 0
     if (Test-Path $outJson) {
         try {
             $j = Get-Content $outJson -Raw | ConvertFrom-Json
             $s = $j.summary
-            Write-Host ("  summary login={0} server={1} type={2} balance={3} type_ok={4} ready={5}" -f `
-                $s.login, $s.server, $s.type, $s.balance, $s.type_ok, $s.ready_for_demo_trading)
-            if ($s.ready_for_demo_trading) {
+            Write-Host ("  summary login={0} server={1} type={2} balance={3} connected={4} trade_allowed={5} authorized={6} ready={7}" -f `
+                $s.login, $s.server, $s.type, $s.balance, $s.server_connected, $s.mcp_trade_allowed, $authorized, $s.ready_for_demo_trading)
+            if ($s.ready_for_demo_trading -and $authorized) {
                 $ready = $true
                 break
             }
@@ -250,15 +261,16 @@ for ($i = 1; $i -le 12; $i++) {
             Write-Host "  account json parse failed: $_"
         }
     }
-    foreach ($line in Get-TerminalAuthLines) { Write-Host "  term: $line" }
+    foreach ($line in $authLines) { Write-Host "  term: $line" }
     Start-Sleep -Seconds 10
 }
 Save-ConfigDiag
-foreach ($line in Get-TerminalAuthLines) { Write-Host "term-final: $line" }
+foreach ($line in @(Get-TerminalAuthLines)) { Write-Host "term-final: $line" }
 if ($ready) {
     Write-Host "MT5_LOGIN_STATUS: DEMO_READY"
 } else {
-    Write-Host "MT5_LOGIN_STATUS: NOT_READY (type may be wrong until broker login completes)"
+    Write-Host ("MT5_LOGIN_STATUS: NOT_READY (connected={0} authorized={1})" -f `
+        $s.server_connected, $authorized)
 }
 
 Write-Host "setup v12 complete"

@@ -114,10 +114,18 @@ def main() -> int:
     server_ok = (not expect_server) or (str(summary.get("server")) == expect_server)
     type_raw = str(summary.get("type") or "").lower()
     type_ok = any(k in type_raw for k in ("demo", "trial", "contest", "practice"))
+    connected_raw = summary.get("server_connected")
+    trade_allowed_raw = summary.get("mcp_trade_allowed")
+    connected_ok = connected_raw is True or str(connected_raw).lower() in {"true", "1"}
+    trade_allowed_ok = trade_allowed_raw is True or str(trade_allowed_raw).lower() in {"true", "1"}
     summary["login_ok"] = login_ok
     summary["server_ok"] = server_ok
     summary["type_ok"] = type_ok
-    summary["ready_for_demo_trading"] = bool(login_ok and server_ok and type_ok)
+    summary["connected_ok"] = connected_ok
+    summary["trade_allowed_ok"] = trade_allowed_ok
+    summary["ready_for_demo_trading"] = bool(
+        login_ok and server_ok and type_ok and connected_ok and trade_allowed_ok
+    )
 
     payload = {"summary": summary, "raw": result}
     text = json.dumps(payload, indent=2, default=str)
