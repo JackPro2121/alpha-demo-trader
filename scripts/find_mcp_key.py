@@ -239,7 +239,19 @@ def config_keys() -> list[str]:
         except OSError:
             continue
         for m in re.finditer(r"(?im)^\s*ApiKey\s*=\s*([0-9a-fA-F]{32,256})\s*$", raw):
-            keys.extend(_deobfuscate_hex(m.group(1)))
+            hx = m.group(1)
+            keys.append(hx)  # raw hex as bearer (server may accept it)
+            keys.extend(_deobfuscate_hex(hx))
+            # hex bytes re-encoded as base64url of GUI length
+            try:
+                b = bytes.fromhex(hx)
+                for n in (31, 32, 48):
+                    if len(b) >= n:
+                        s = base64.urlsafe_b64encode(b[:n]).decode().rstrip("=")
+                        if _looks_like_key(s):
+                            keys.append(s)
+            except ValueError:
+                pass
         # plaintext ApiKey
         for m in re.finditer(r"(?im)^\s*ApiKey\s*=\s*([A-Za-z0-9_-]{40,64})\s*$", raw):
             keys.append(m.group(1))
