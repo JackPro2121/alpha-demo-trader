@@ -205,6 +205,7 @@ if (-not $key) {
     exit 0
 }
 
+if ($env:GITHUB_ACTIONS -eq "true") { Write-Output "::add-mask::$key" }
 "MCP_TOKEN=$key" | Add-Content -Path $env:GITHUB_ENV
 "MT5_MCP_TOKEN=$key" | Add-Content -Path $env:GITHUB_ENV
 $env:MCP_TOKEN = $key
