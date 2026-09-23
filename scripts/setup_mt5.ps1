@@ -1,8 +1,6 @@
-# MT5 setup v9: install + enable MCP WITHOUT seeding ApiKey (Generate/default path).
-# Seeding a plaintext ApiKey made MT5 rewrite assistant.ini to 168-hex (broken
-# Generate-style key per MQL5 forum #515076 — default key works, Generate often 401s).
-# Strategy: Enable=1 only, let MT5 create its default key, then discover via
-# raw-hex-as-bearer + memory scan + deobfuscation. Fallback: alternate port.
+# MT5 setup v10: seed plaintext MCP ApiKey + lock assistant.ini read-only.
+# Local proof (2026-09-23): plaintext key + attrib read-only + restart => probe 200.
+# Without read-only, MT5 rewrites ApiKey to 168-hex on start and auth 401s.
 
 $ErrorActionPreference = "Stop"
 $setup = "$env:TEMP\mt5setup.exe"
@@ -47,7 +45,7 @@ if (-not (Test-Path $term)) {
 if (-not (Test-Path $term)) { throw "terminal64.exe not found" }
 Write-Host "terminal: $term"
 
-Write-Host "[3] writing login.ini + assistant.ini Enable=1 (NO ApiKey seed)..."
+Write-Host "[3] writing login.ini + assistant.ini (plaintext ApiKey + read-only)..."
 $cfgDir = Join-Path $dir "Config"
 New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
 @"
@@ -57,33 +55,45 @@ Password=$pass
 Server=$server
 "@ | Set-Content -Path (Join-Path $cfgDir "alpha_login.ini") -Encoding ASCII
 
-# Enable MCP only — do NOT write ApiKey (seed forced MT5 into broken rewrite path).
-# MetaTrader creates its default working key on first enable (forum: default works).
+# Local-verified seed: plaintext GUI-format key. Random per run so we own the secret.
+$bytes = New-Object byte[] 31
+[Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+$seedKey = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+if ($seedKey.Length -lt 40) { throw "seed key too short ($($seedKey.Length))" }
+
 $asst = Join-Path $cfgDir "assistant.ini"
 $ini = @"
 [MCP.MetaTrader]
 Enable=1
 Endpoint=http://127.0.0.1:22346/mcp
+ApiKey=$seedKey
+[MCP.MetaEditor]
+Enable=1
+Endpoint=http://127.0.0.1:22345/mcp
+ApiKey=$seedKey
 "@
+# clear any prior readonly from reinstall
+if (Test-Path $asst) { (Get-Item $asst).IsReadOnly = $false }
 Set-Content -Path $asst -Value $ini -Encoding Unicode
-Write-Host "seeded assistant.ini Enable=1 only (no ApiKey)"
+(Get-Item $asst).IsReadOnly = $true
+Write-Host "seeded assistant.ini plaintext ApiKey (len=$($seedKey.Length)) + READ-ONLY"
 
-# Always-stage assistant.ini (post-run) for artifact upload (lengths only in logs).
 $artDir = Join-Path $env:RUNNER_TEMP "mt5-config"
 New-Item -ItemType Directory -Force -Path $artDir | Out-Null
 
-Write-Host "[4] launching terminal /portable /config (auto-login + MCP)..."
+Write-Host "[4] launching terminal /config (auto-login + MCP)..."
 $loginIni = Join-Path $cfgDir "alpha_login.ini"
 Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 2
 Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
 
+# Primary: probe our seed key immediately (server should load plaintext from read-only file).
 $finder = Join-Path $repoRoot "scripts\find_mcp_key.py"
-if (-not (Test-Path $finder)) { throw "find_mcp_key.py missing at $finder" }
-
-function Invoke-KeyFind([string]$label, [string]$url) {
-    Write-Host "$label discovering MCP key at $url (hex-as-bearer + memory + config)..."
-    $out = & python $finder --url $url --wait 150 --rescan 6 2>&1
+function Invoke-KeyFind([string]$label, [string]$url, [string]$extraArgs = "") {
+    Write-Host "$label discovering MCP key at $url ..."
+    $argList = @($finder, "--url", $url, "--wait", "150", "--rescan", "6", "--seed-key", $seedKey)
+    if ($extraArgs) { $argList += $extraArgs -split ' ' }
+    $out = & python @argList 2>&1
     $exit = $LASTEXITCODE
     $out | ForEach-Object { Write-Host "  $_" }
     if ($exit -ne 0) { return $null }
@@ -91,73 +101,80 @@ function Invoke-KeyFind([string]$label, [string]$url) {
     return $k
 }
 
-$key = Invoke-KeyFind "[5]" "http://127.0.0.1:22346/mcp"
-
-# dump lengths for diagnosis + stage for artifact
 function Save-ConfigDiag {
     if (Test-Path $asst) {
-        Copy-Item $asst (Join-Path $artDir "assistant.ini") -Force -EA SilentlyContinue
-        $txt = Get-Content $asst -Raw -EA SilentlyContinue
+        Copy-Item $asst (Join-Path $artDir "assistant.ini") -Force -ErrorAction SilentlyContinue
+        $txt = Get-Content $asst -Raw -ErrorAction SilentlyContinue
         if ($txt -match '(?im)ApiKey\s*=\s*(\S+)') {
             $v = $Matches[1]
-            Write-Host ("assistant.ini ApiKey present len={0} hex_like={1}" -f $v.Length, ($v -match '^[0-9a-fA-F]+$'))
-        } else {
-            Write-Host "assistant.ini ApiKey ABSENT (MT5 did not write one)"
+            Write-Host ("assistant.ini ApiKey present len={0} hex_like={1} readonly={2}" -f `
+                $v.Length, ($v -match '^[0-9a-fA-F]+$'), (Get-Item $asst).IsReadOnly)
         }
         Write-Host ("assistant.ini bytes={0}" -f (Get-Item $asst).Length)
     } else {
         Write-Host "assistant.ini missing at $asst"
     }
-    # portable config too
-    $portCfg = Join-Path $dir "Config\assistant.ini"
-    # also data-folder assistant (non-portable path)
-    $roaming = Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Recurse -Filter assistant.ini -EA SilentlyContinue
+    $roaming = Get-ChildItem "$env:APPDATA\MetaQuotes\Terminal" -Recurse -Filter assistant.ini -ErrorAction SilentlyContinue
     foreach ($f in $roaming) {
-        Copy-Item $f.FullName (Join-Path $artDir ("assistant_" + $f.Directory.Name + ".ini")) -Force -EA SilentlyContinue
-        $txt = Get-Content $f.FullName -Raw -EA SilentlyContinue
+        Copy-Item $f.FullName (Join-Path $artDir ("assistant_" + $f.Directory.Name + ".ini")) -Force -ErrorAction SilentlyContinue
+        $txt = Get-Content $f.FullName -Raw -ErrorAction SilentlyContinue
         if ($txt -match '(?im)ApiKey\s*=\s*(\S+)') {
             Write-Host ("roaming {0} ApiKey len={1}" -f $f.FullName, $Matches[1].Length)
         }
     }
-    # stage terminal logs (tail)
     $logRoots = @("$env:APPDATA\MetaQuotes\Terminal", (Join-Path $dir "logs"))
     foreach ($lr in $logRoots) {
         if (Test-Path $lr) {
-            Get-ChildItem $lr -Recurse -Filter *.log -EA SilentlyContinue |
+            Get-ChildItem $lr -Recurse -Filter *.log -ErrorAction SilentlyContinue |
                 Sort-Object LastWriteTime -Descending | Select-Object -First 4 |
-                ForEach-Object { Copy-Item $_.FullName (Join-Path $artDir $_.Name) -Force -EA SilentlyContinue }
+                ForEach-Object { Copy-Item $_.FullName (Join-Path $artDir $_.Name) -Force -ErrorAction SilentlyContinue }
         }
     }
 }
 
+$key = Invoke-KeyFind "[5]" "http://127.0.0.1:22346/mcp"
 Save-ConfigDiag
 
 if (-not $key) {
-    Write-Host "[6] restart terminal (reload on-disk default key) + retry..."
+    Write-Host "[6] restart terminal (reload read-only plaintext key) + retry..."
     Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Seconds 5
+    # re-apply seed if MT5 somehow made it writable and rewrote
+    if (Test-Path $asst) {
+        try {
+            (Get-Item $asst).IsReadOnly = $false
+            $cur = Get-Content $asst -Raw -ErrorAction SilentlyContinue
+            if ($cur -notmatch [regex]::Escape($seedKey)) {
+                $ini2 = @"
+[MCP.MetaTrader]
+Enable=1
+Endpoint=http://127.0.0.1:22346/mcp
+ApiKey=$seedKey
+[MCP.MetaEditor]
+Enable=1
+Endpoint=http://127.0.0.1:22345/mcp
+ApiKey=$seedKey
+"@
+                Set-Content -Path $asst -Value $ini2 -Encoding Unicode
+                Write-Host "re-seeded plaintext ApiKey"
+            }
+            (Get-Item $asst).IsReadOnly = $true
+        } catch {
+            Write-Host "readonly re-apply warning: $_"
+        }
+    }
     Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
     $key = Invoke-KeyFind "[7]" "http://127.0.0.1:22346/mcp"
     Save-ConfigDiag
 }
 
-# Forum fix: regenerate + change port (22344) when 22346 stays 401.
 if (-not $key) {
-    Write-Host "[8] rewrite Endpoint to :22344 + restart + retry..."
-    Get-Process terminal64 -ErrorAction SilentlyContinue | Stop-Process -Force
-    Start-Sleep -Seconds 3
-    $ini2 = @"
-[MCP.MetaTrader]
-Enable=1
-Endpoint=http://127.0.0.1:22344/mcp
-"@
-    Set-Content -Path $asst -Value $ini2 -Encoding Unicode
-    Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
-    $key = Invoke-KeyFind "[9]" "http://127.0.0.1:22344/mcp"
-    Save-ConfigDiag
-    if ($key) {
-        "MT5_MCP_URL=http://127.0.0.1:22344/mcp" | Add-Content -Path $env:GITHUB_ENV
-        Write-Host "MCP url switched to 22344"
+    # last resort: seed-key direct probe once more after short wait
+    Write-Host "[8] direct seed-key probe..."
+    $out = & python $finder --url "http://127.0.0.1:22346/mcp" --wait 30 --rescan 4 --seed-key $seedKey 2>&1
+    $out | ForEach-Object { Write-Host "  $_" }
+    if ($LASTEXITCODE -eq 0) {
+        $key = (@($out) | Where-Object { $_ -match '^[A-Za-z0-9_-]{40,64}$' } | Select-Object -Last 1)
     }
 }
 
@@ -170,4 +187,4 @@ if (-not $key) {
 "MCP_TOKEN=$key" | Add-Content -Path $env:GITHUB_ENV
 Write-Host "MCP_PORT_PROBE: ALIVE+AUTH"
 Write-Host "MCP_TOKEN exported (not printed)"
-Write-Host "setup v9 complete"
+Write-Host "setup v10 complete"
