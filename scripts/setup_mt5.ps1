@@ -48,6 +48,10 @@ Write-Host "terminal: $term"
 Write-Host "[3] writing login.ini + assistant.ini (plaintext ApiKey + read-only)..."
 $cfgDir = Join-Path $dir "Config"
 New-Item -ItemType Directory -Force -Path $cfgDir | Out-Null
+$brokerDirectory = Join-Path $repoRoot "alpha-data-store\mt5\servers.dat"
+if (-not (Test-Path $brokerDirectory)) { throw "private broker directory missing: alpha-data-store/mt5/servers.dat" }
+Copy-Item $brokerDirectory (Join-Path $cfgDir "servers.dat") -Force
+Write-Host "private broker directory installed (bytes=$((Get-Item (Join-Path $cfgDir 'servers.dat')).Length))"
 @"
 [Common]
 Login=$login
