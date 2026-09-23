@@ -56,10 +56,22 @@ Server=$server
 "@ | Set-Content -Path (Join-Path $cfgDir "alpha_login.ini") -Encoding ASCII
 
 # Local-verified seed: plaintext GUI-format key. Random per run so we own the secret.
+# Never start with '-': argparse treats "KEY" after --seed-key as a flag (v10 runner bug).
 $bytes = New-Object byte[] 31
-[Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
-$seedKey = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
-if ($seedKey.Length -lt 40) { throw "seed key too short ($($seedKey.Length))" }
+try {
+    [Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+} catch {
+    $rng = [Security.Cryptography.RandomNumberGenerator]::Create()
+    $rng.GetBytes($bytes)
+}
+for ($try = 0; $try -lt 32; $try++) {
+    $seedKey = [Convert]::ToBase64String($bytes).TrimEnd('=').Replace('+','-').Replace('/','_')
+    if ($seedKey.Length -ge 40 -and -not $seedKey.StartsWith('-')) { break }
+    [Security.Cryptography.RandomNumberGenerator]::Create().GetBytes($bytes)
+}
+if ($seedKey.Length -lt 40 -or $seedKey.StartsWith('-')) {
+    throw "seed key invalid (len=$($seedKey.Length) dash=$($seedKey.StartsWith('-')))"
+}
 
 $asst = Join-Path $cfgDir "assistant.ini"
 $ini = @"
@@ -91,7 +103,8 @@ Start-Process -FilePath $term -ArgumentList "/portable", "/config:$loginIni"
 $finder = Join-Path $repoRoot "scripts\find_mcp_key.py"
 function Invoke-KeyFind([string]$label, [string]$url, [string]$extraArgs = "") {
     Write-Host "$label discovering MCP key at $url ..."
-    $argList = @($finder, "--url", $url, "--wait", "150", "--rescan", "6", "--seed-key", $seedKey)
+    # equals-form: space form breaks if value starts with '-' (argparse flag)
+    $argList = @($finder, "--url=$url", "--wait=150", "--rescan=6", "--seed-key=$seedKey")
     if ($extraArgs) { $argList += $extraArgs -split ' ' }
     $out = & python @argList 2>&1
     $exit = $LASTEXITCODE
@@ -171,7 +184,7 @@ ApiKey=$seedKey
 if (-not $key) {
     # last resort: seed-key direct probe once more after short wait
     Write-Host "[8] direct seed-key probe..."
-    $out = & python $finder --url "http://127.0.0.1:22346/mcp" --wait 30 --rescan 4 --seed-key $seedKey 2>&1
+    $out = & python $finder "--url=http://127.0.0.1:22346/mcp" "--wait=30" "--rescan=4" "--seed-key=$seedKey" 2>&1
     $out | ForEach-Object { Write-Host "  $_" }
     if ($LASTEXITCODE -eq 0) {
         $key = (@($out) | Where-Object { $_ -match '^[A-Za-z0-9_-]{40,64}$' } | Select-Object -Last 1)

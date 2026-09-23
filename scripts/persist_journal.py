@@ -45,6 +45,8 @@ def main() -> int:
         print("nothing to persist")
         return 0
     _git("add", "-A")
+    _git("config", "user.email", "alpha-demo-trader@users.noreply.github.com")
+    _git("config", "user.name", "alpha-demo-trader")
     commit = _git("commit", "-m", f"journal snapshot {stamp}")
     if commit.returncode != 0 and "nothing to commit" not in commit.stdout:
         print("commit failed:", commit.stderr[:200])
