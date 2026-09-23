@@ -244,7 +244,7 @@ function Get-TerminalAuthLines {
 
 $ready = $false
 $authorized = $false
-$authPattern = "(?i)authorized on\s+$([regex]::Escape($server))(?:\s|$)"
+$authPattern = "(?i)authori[sz]ed on\s+$([regex]::Escape($server))(?:\s|$)"
 for ($i = 1; $i -le 12; $i++) {
     Write-Host "[login-wait $i/12] dumping MCP account_info..."
     & python $dump --url=http://127.0.0.1:22346/mcp --token=$key --out=$outJson --wait=5 `
