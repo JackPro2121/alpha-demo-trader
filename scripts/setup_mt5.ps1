@@ -1,6 +1,5 @@
-# MT5 setup v10: seed plaintext MCP ApiKey + lock assistant.ini read-only.
-# Local proof (2026-09-23): plaintext key + attrib read-only + restart => probe 200.
-# Without read-only, MT5 rewrites ApiKey to 168-hex on start and auth 401s.
+# MT5 setup v12: seed plaintext MCP ApiKey + lock assistant.ini read-only,
+# then wait/dump broker account until demo type is confirmed.
 
 $ErrorActionPreference = "Stop"
 $setup = "$env:TEMP\mt5setup.exe"
@@ -198,6 +197,68 @@ if (-not $key) {
 }
 
 "MCP_TOKEN=$key" | Add-Content -Path $env:GITHUB_ENV
+$env:MCP_TOKEN = $key
 Write-Host "MCP_PORT_PROBE: ALIVE+AUTH"
 Write-Host "MCP_TOKEN exported (not printed)"
-Write-Host "setup v10 complete"
+
+# --- broker login wait + account type dump (fresh install often logs in late) ---
+$dump = Join-Path $repoRoot "scripts\dump_mt5_account.py"
+$outJson = Join-Path $artDir "account_info.json"
+function Get-TerminalAuthLines {
+    $lines = @()
+    $logRoots = @((Join-Path $dir "logs"), "$env:APPDATA\MetaQuotes\Terminal")
+    foreach ($lr in $logRoots) {
+        if (-not (Test-Path $lr)) { continue }
+        Get-ChildItem $lr -Recurse -Filter *.log -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 3 |
+            ForEach-Object {
+                try {
+                    $b = [IO.File]::ReadAllBytes($_.FullName)
+                    if ($b.Length -ge 2 -and $b[0] -eq 0xFF -and $b[1] -eq 0xFE) {
+                        $t = [Text.Encoding]::Unicode.GetString($b, 2, $b.Length - 2)
+                    } else {
+                        $t = [Text.Encoding]::UTF8.GetString($b)
+                    }
+                    foreach ($line in ($t -split "`n")) {
+                        if ($line -match 'authorized on|Invalid account|authorization on|no connection|trade server') {
+                            $lines += $line.Trim()
+                        }
+                    }
+                } catch { }
+            }
+    }
+    return $lines | Select-Object -Last 20
+}
+
+$ready = $false
+for ($i = 1; $i -le 12; $i++) {
+    Write-Host "[login-wait $i/12] dumping MCP account_info..."
+    & python $dump --url=http://127.0.0.1:22346/mcp --token=$key --out=$outJson --wait=5 `
+        --expect-login=$login --expect-server=$server 2>&1 |
+        ForEach-Object { Write-Host "  $_" }
+    if (Test-Path $outJson) {
+        try {
+            $j = Get-Content $outJson -Raw | ConvertFrom-Json
+            $s = $j.summary
+            Write-Host ("  summary login={0} server={1} type={2} balance={3} type_ok={4} ready={5}" -f `
+                $s.login, $s.server, $s.type, $s.balance, $s.type_ok, $s.ready_for_demo_trading)
+            if ($s.ready_for_demo_trading) {
+                $ready = $true
+                break
+            }
+        } catch {
+            Write-Host "  account json parse failed: $_"
+        }
+    }
+    foreach ($line in Get-TerminalAuthLines) { Write-Host "  term: $line" }
+    Start-Sleep -Seconds 10
+}
+Save-ConfigDiag
+foreach ($line in Get-TerminalAuthLines) { Write-Host "term-final: $line" }
+if ($ready) {
+    Write-Host "MT5_LOGIN_STATUS: DEMO_READY"
+} else {
+    Write-Host "MT5_LOGIN_STATUS: NOT_READY (type may be wrong until broker login completes)"
+}
+
+Write-Host "setup v12 complete"

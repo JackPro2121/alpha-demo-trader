@@ -109,6 +109,39 @@ jobs:
           pip install -r ALFAFOREX/requirements.txt
           pip install MetaTrader5
 
+      - name: Broker login + demo gate
+        if: steps.market_check.outputs.is_open == 'true'
+        shell: pwsh
+        env:
+          MCP_TOKEN: ${{ env.MCP_TOKEN }}
+          MT5_PATH: C:\Program Files\MetaTrader 5\terminal64.exe
+          MT5_ACCOUNT_JSON_OUT: ${{ runner.temp }}/mt5-config/account_info_login.json
+        run: |
+          $loginScript = Join-Path $env:GITHUB_WORKSPACE "scripts\mt5_login.py"
+          $ok = $false
+          foreach ($i in 1..3) {
+            Write-Host "=== mt5_login attempt $i/3 ==="
+            python $loginScript
+            if ($LASTEXITCODE -eq 0) { $ok = $true; break }
+            Start-Sleep -Seconds 10
+          }
+          $dumpScript = Join-Path $env:GITHUB_WORKSPACE "scripts\dump_mt5_account.py"
+          Write-Host "=== MCP account dump (post-login) ==="
+          python $dumpScript --wait=15 --out="$env:RUNNER_TEMP\mt5-config\account_info.json"
+          $acct = "$env:RUNNER_TEMP\mt5-config\account_info.json"
+          $ready = $false
+          if (Test-Path $acct) {
+            try {
+              $s = (Get-Content $acct -Raw | ConvertFrom-Json).summary
+              Write-Host ("MCP_ACCOUNT login={0} server={1} type={2} balance={3} ready={4}" -f `
+                $s.login, $s.server, $s.type, $s.balance, $s.ready_for_demo_trading)
+              if ($s.ready_for_demo_trading) { $ready = $true }
+            } catch { Write-Host "account json parse failed: $_" }
+          }
+          if (-not $ready) {
+            Write-Host "::warning::Demo account not ready (login/type). Watcher may skip orders (safety type gate)."
+          }
+
       - name: Run watcher
         if: steps.market_check.outputs.is_open == 'true'
         shell: pwsh
