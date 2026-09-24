@@ -104,6 +104,14 @@ jobs:
           pip install -r ALFAFOREX/requirements.txt
           pip install --upgrade MetaTrader5
 
+      - name: Restore durable watcher state
+        if: steps.market_check.outputs.is_open == 'true'
+        shell: pwsh
+        working-directory: ALFAFOREX/forexgpt-3.0
+        run: python ../../alpha-demo-trader/scripts/persist_journal.py --restore
+        env:
+          STORE_DIR: ${{ github.workspace }}/alpha-data-store
+
       - name: Install MT5 terminal (silent)
         if: steps.market_check.outputs.is_open == 'true'
         shell: pwsh
@@ -163,37 +171,24 @@ jobs:
               --symbols "$syms" `
               --timeframe "$tf"
           } else {
-            $end = (Get-Date).AddMinutes(315)
-            while ((Get-Date) -lt $end) {
-              # Check if Friday market close reached during loop
-              $nowUtc = [DateTime]::UtcNow
-              if ($nowUtc.DayOfWeek -eq [DayOfWeek]::Friday -and $nowUtc.Hour -ge 22) {
-                Write-Host "Friday 22:00 UTC reached -- market closed for weekend. Exiting loop cleanly."
-                break
-              }
-              if ($nowUtc.DayOfWeek -eq [DayOfWeek]::Saturday) {
-                Write-Host "Saturday reached -- market closed. Exiting loop cleanly."
-                break
-              }
-
-              python -u -m forexgpt3.scripts.live_watch --once `
-                --symbols "$syms" `
-                --timeframe "$tf"
-              Start-Sleep -Seconds 60
-            }
+            python -u -m forexgpt3.scripts.live_watch `
+              --symbols "$syms" `
+              --timeframe "$tf" `
+              --interval 60 `
+              --max-runtime 315
           }
 
       - name: Persist journal to data-store
-        if: steps.market_check.outputs.is_open == 'true'
+        if: always() && steps.market_check.outputs.is_open == 'true'
         shell: pwsh
         working-directory: ALFAFOREX/forexgpt-3.0
         run: |
-          python ../../scripts/persist_journal.py
+          python ../../alpha-demo-trader/scripts/persist_journal.py
         env:
           STORE_DIR: ${{ github.workspace }}/alpha-data-store
 
       - name: Upload journal artifact
-        if: steps.market_check.outputs.is_open == 'true'
+        if: always() && steps.market_check.outputs.is_open == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: journal-${{ github.run_id }}
