@@ -127,7 +127,7 @@ jobs:
             Start-Sleep -Seconds 10
           }
           if (-not $ok) {
-            Write-Warning "MetaTrader5 package login did not initialize; MCP readiness remains authoritative."
+            throw "MetaTrader5 account capability check failed; refusing to start watcher"
           }
           $dumpScript = Join-Path $env:GITHUB_WORKSPACE "scripts\dump_mt5_account.py"
           Write-Host "=== MCP account dump (post-login) ==="

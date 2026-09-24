@@ -91,6 +91,8 @@ def main() -> int:
     actual_login = getattr(account, "login", None)
     actual_server = str(getattr(account, "server", "") or "").strip()
     trade_mode = getattr(account, "trade_mode", None)
+    account_trade_allowed = getattr(account, "trade_allowed", None)
+    account_trade_expert = getattr(account, "trade_expert", None)
     mode = {0: "demo", 1: "contest", 2: "real"}.get(trade_mode, str(trade_mode))
     if str(actual_login) != str(login):
         print(f"LOGIN_FAIL code=wrong-login reason=expected configured account, got {actual_login}")
@@ -101,8 +103,11 @@ def main() -> int:
     if mode not in {"demo", "contest"}:
         print(f"LOGIN_FAIL code=unsafe-type reason=trade_mode={mode}")
         return 1
+    if not account_trade_allowed or not account_trade_expert:
+        print(f"LOGIN_FAIL code=account-trade-disabled reason=trade_allowed={account_trade_allowed} trade_expert={account_trade_expert}")
+        return 1
 
-    print(f"LOGIN_OK login=verified server={actual_server} type={mode} balance={getattr(account, 'balance', 'unknown')}")
+    print(f"LOGIN_OK login=verified server={actual_server} type={mode} balance={getattr(account, 'balance', 'unknown')} trade_allowed={account_trade_allowed} trade_expert={account_trade_expert}")
     try:
         mt5.shutdown()
     except Exception:
