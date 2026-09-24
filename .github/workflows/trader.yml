@@ -108,7 +108,7 @@ jobs:
         if: steps.market_check.outputs.is_open == 'true'
         shell: pwsh
         working-directory: ALFAFOREX/forexgpt-3.0
-        run: python ../../alpha-demo-trader/scripts/persist_journal.py --restore
+        run: python ../../scripts/persist_journal.py --restore
         env:
           STORE_DIR: ${{ github.workspace }}/alpha-data-store
 
@@ -183,7 +183,7 @@ jobs:
         shell: pwsh
         working-directory: ALFAFOREX/forexgpt-3.0
         run: |
-          python ../../alpha-demo-trader/scripts/persist_journal.py
+          python ../../scripts/persist_journal.py
         env:
           STORE_DIR: ${{ github.workspace }}/alpha-data-store
 
