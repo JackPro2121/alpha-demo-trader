@@ -106,6 +106,8 @@ def main() -> int:
             if isinstance(result.get("terminal"), dict) else None,
         "mcp_trade_allowed": (result.get("terminal") or {}).get("mcp_trade_allowed")
             if isinstance(result.get("terminal"), dict) else None,
+        "experts_trade_allowed": (result.get("terminal") or {}).get("experts_trade_allowed")
+            if isinstance(result.get("terminal"), dict) else None,
         "error": result.get("error"),
     }
     expect_login = str(args.expect_login).strip()
@@ -116,15 +118,18 @@ def main() -> int:
     type_ok = any(k in type_raw for k in ("demo", "trial", "contest", "practice"))
     connected_raw = summary.get("server_connected")
     trade_allowed_raw = summary.get("mcp_trade_allowed")
+    experts_raw = summary.get("experts_trade_allowed")
     connected_ok = connected_raw is True or str(connected_raw).lower() in {"true", "1"}
     trade_allowed_ok = trade_allowed_raw is True or str(trade_allowed_raw).lower() in {"true", "1"}
+    experts_ok = experts_raw is True or str(experts_raw).lower() in {"true", "1"}
     summary["login_ok"] = login_ok
     summary["server_ok"] = server_ok
     summary["type_ok"] = type_ok
     summary["connected_ok"] = connected_ok
     summary["trade_allowed_ok"] = trade_allowed_ok
+    summary["experts_trade_allowed_ok"] = experts_ok
     summary["ready_for_demo_trading"] = bool(
-        login_ok and server_ok and type_ok and connected_ok and trade_allowed_ok
+        login_ok and server_ok and type_ok and connected_ok and trade_allowed_ok and experts_ok
     )
 
     payload = {"summary": summary, "raw": result}

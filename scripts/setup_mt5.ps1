@@ -57,6 +57,9 @@ Write-Host "private broker directory installed (bytes=$((Get-Item (Join-Path $cf
 Login=$login
 Password=$pass
 Server=$server
+[Experts]
+AllowLiveTrading=1
+AllowDllImport=0
 "@ | Set-Content -Path (Join-Path $cfgDir "alpha_login.ini") -Encoding ASCII
 
 # Local-verified seed: plaintext GUI-format key. Random per run so we own the secret.

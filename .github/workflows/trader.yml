@@ -137,9 +137,9 @@ jobs:
           if (Test-Path $acct) {
             try {
               $s = (Get-Content $acct -Raw | ConvertFrom-Json).summary
-              Write-Host ("MCP_ACCOUNT login={0} server={1} type={2} balance={3} connected={4} trade_allowed={5} ready={6}" -f `
-                $s.login, $s.server, $s.type, $s.balance, $s.server_connected, $s.mcp_trade_allowed, $s.ready_for_demo_trading)
-              if ($s.ready_for_demo_trading -and $s.server_connected -eq $true -and $s.mcp_trade_allowed -eq $true) { $ready = $true }
+              Write-Host ("MCP_ACCOUNT login={0} server={1} type={2} balance={3} connected={4} mcp_trade_allowed={5} experts_trade_allowed={6} ready={7}" -f `
+                $s.login, $s.server, $s.type, $s.balance, $s.server_connected, $s.mcp_trade_allowed, $s.experts_trade_allowed, $s.ready_for_demo_trading)
+              if ($s.ready_for_demo_trading -and $s.server_connected -eq $true -and $s.mcp_trade_allowed -eq $true -and $s.experts_trade_allowed -eq $true) { $ready = $true }
             } catch { Write-Host "account json parse failed: $_" }
           }
           if (-not $ready) {
