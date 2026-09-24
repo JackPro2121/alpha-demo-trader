@@ -95,6 +95,11 @@ ApiKey=$seedKey
 Enable=1
 Endpoint=http://127.0.0.1:22345/mcp
 ApiKey=$seedKey
+[Assistant]
+PermissionsTrade=1
+PermissionsWeb=0
+PermissionsOpposite=0
+PermissionsShell=0
 "@
 # clear any prior readonly from reinstall
 if (Test-Path $asst) { (Get-Item $asst).IsReadOnly = $false }
@@ -184,6 +189,11 @@ ApiKey=$seedKey
 Enable=1
 Endpoint=http://127.0.0.1:22345/mcp
 ApiKey=$seedKey
+[Assistant]
+PermissionsTrade=1
+PermissionsWeb=0
+PermissionsOpposite=0
+PermissionsShell=0
 "@
                 Set-Content -Path $asst -Value $ini2 -Encoding Unicode
                 Write-Host "re-seeded plaintext ApiKey"
