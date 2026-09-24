@@ -60,7 +60,12 @@ Server=$server
 [Experts]
 AllowLiveTrading=1
 AllowDllImport=0
+Enabled=1
+Account=1
+Profile=1
+Api=1
 "@ | Set-Content -Path (Join-Path $cfgDir "alpha_login.ini") -Encoding ASCII
+(Get-Item (Join-Path $cfgDir "alpha_login.ini")).IsReadOnly = $true
 
 # Local-verified seed: plaintext GUI-format key. Random per run so we own the secret.
 # Never start with '-': argparse treats "KEY" after --seed-key as a flag (v10 runner bug).
